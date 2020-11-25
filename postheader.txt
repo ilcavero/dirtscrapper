@@ -1,0 +1,5 @@
+goto https://dirtrally2.dirtgame.com/, press F12 goto network tab, open leaderboard on your browser
+look for this request
+POST /api/Leaderboard HTTP/1.1
+right click -> copy headers
+paste here
