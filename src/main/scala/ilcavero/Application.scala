@@ -13,7 +13,7 @@ object Application extends App {
 
   println("Starting the scraper....")
 
-  val clubId: String = if(args.isEmpty) {
+  val clubId: String = if (args.isEmpty) {
     println("please pass the club ID as java arg")
     System.exit(1)
     ""
@@ -45,7 +45,7 @@ object Application extends App {
     }
 
 
-  val mainTreeJson = requests.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/recentResults",  headers = headers, verifySslCerts = false)
+  val mainTreeJson = requests.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/recentResults", headers = headers, verifySslCerts = false)
 
   val root = read[Root](mainTreeJson)
 
@@ -59,15 +59,15 @@ object Application extends App {
   implicit val rwle: ReadWriter[LeaderboardEntries] = macroRW
   implicit val rwl: ReadWriter[Leaderboard] = macroRW
 
-  val championshipId = if(args.size > 1) Some(args(1)) else None
-  val eventId = if(args.size > 2) Some(args(2)) else None
+  val championshipId = if (args.size > 1) Some(args(1)) else None
+  val eventId = if (args.size > 2) Some(args(2)) else None
 
   val allLeadeboards: List[LeaderboardHolder] = for {
     championship <- root.championships if championshipId.forall(_ == championship.id)
     event <- championship.events if eventId.forall(_ == event.id)
     stage <- event.stages
   } yield {
-    Thread.sleep(463)
+    Thread.sleep(400)
 
     def postBody(wheel: String): String =
       s"""{"challengeId":"${event.challengeId}","selectedEventId":0,"stageId":"${stage.id}","page":1,"pageSize":100,"orderByTotalTime":true,"platformFilter":"None","playerFilter":"Everyone","filterByAssists":"Unspecified","filterByWheel":"$wheel","nationalityFilter":"None","eventId":"${event.id}"}"""
@@ -84,10 +84,11 @@ object Application extends App {
           throw exception
       }
     }
+
     val wheels = getLeaderboard("ON").entries.map(_.name)
 
     val leaderboard = getLeaderboard("Unspecified")
-    val leaderboardWithWheels =leaderboard.copy(leaderboard.entries.map(e => e.copy(wheel = Some(wheels.contains(e.name)))))
+    val leaderboardWithWheels = leaderboard.copy(leaderboard.entries.map(e => e.copy(wheel = Some(wheels.contains(e.name)))))
     LeaderboardHolder(championship, event, stage, leaderboardWithWheels)
   }
 
@@ -106,7 +107,7 @@ object Application extends App {
   }
 
   var lastStageMap = Map[String, String]()
-  var stageTimesMap = Map[String, List[(String, Double, Double, Boolean)]]()
+  var stageTimesMap = Map[(String, String), List[(String, Double, Double, Boolean)]]()
   for {
     lh <- allLeadeboards
     l <- lh.leaderboard.entries
@@ -114,7 +115,7 @@ object Application extends App {
     lastStageMap = lastStageMap.updated(lh.event.id, lh.stage.id)
     val stageTimeDouble = toTimeDouble(l.stageTime)
     val totalTimeDouble = toTimeDouble(l.totalTime)
-    stageTimesMap = stageTimesMap.updatedWith(lh.event.id + lh.stage.id) {
+    stageTimesMap = stageTimesMap.updatedWith(lh.event.id -> lh.stage.id) {
       case Some(rest) =>
         Some(((l.name, stageTimeDouble, totalTimeDouble, l.isDnfEntry) :: rest).sortBy(_._2))
       case None =>
@@ -122,7 +123,39 @@ object Application extends App {
     }
   }
 
-  val stageTimesDescriptive: Map[String, (LogNormalDistribution, LogNormalDistribution)] = stageTimesMap.map {
+  val startingDrivers: Map[(Championship, Event), Set[(String, Boolean, String)]] = {
+    var result: Map[(Championship, Event), Set[(String, Boolean, String)]] = Map.empty.withDefaultValue(Set.empty)
+    for {
+      LeaderboardHolder(championship, event, stage, Leaderboard(entries)) <- allLeadeboards if entries.nonEmpty && stage.id != lastStageMap(event.id)
+    } {
+      val startingDriverInfo: Set[(String, Boolean, String)] = entries.map {
+        entry => (entry.name, entry.wheel.get, entry.vehicleName)
+      }.toSet
+      result = result.updated(championship -> event, result(championship -> event) ++ startingDriverInfo)
+    }
+    result
+  }
+
+  val allLeaderboardsPlusDnf = allLeadeboards.map {
+    case LeaderboardHolder(championship, event, stage, Leaderboard(entries)) if entries.nonEmpty && stage.id == lastStageMap(event.id) =>
+      val stageStartingDrivers: Set[(String, Boolean, String)] = startingDrivers(championship -> event)
+      val runningDrivers = entries.map(e => e.name).toSet
+      var dnfRank = runningDrivers.size
+      val missingDnfs: Set[LeaderboardEntries] = stageStartingDrivers.collect {
+        case (name, wheel, vehicle) if !runningDrivers.contains(name) =>
+          dnfRank += 1
+          val totaltimeMin = 30 * (stage.id.toInt + 1)
+          val hourTotalTime = totaltimeMin / 60
+          val minTotalTime = totaltimeMin % 60
+          val totalTime = hourTotalTime.formatted("%02d") + ":" + minTotalTime.formatted("%02d") + ":00.000"
+          LeaderboardEntries(dnfRank, name, true, vehicle,
+            "30:00.000", "+30:00.000", totalTime, "+" + totalTime, Some(wheel))
+      }
+      LeaderboardHolder(championship, event, stage, Leaderboard(entries ++ missingDnfs))
+    case lh => lh
+  }
+
+  val stageTimesDescriptive: Map[(String, String), (LogNormalDistribution, LogNormalDistribution)] = stageTimesMap.map {
     case (key, timeTriples) =>
       val stageStats = new DescriptiveStatistics()
       val totalStats = new DescriptiveStatistics()
@@ -135,26 +168,38 @@ object Application extends App {
       key -> (new LogNormalDistribution(stageStats.getMean, stageStats.getStandardDeviation) -> new LogNormalDistribution(totalStats.getMean, totalStats.getStandardDeviation))
   }
 
-  val f = new File("leaderboard.csv")
+  val f = new File("leaderboarddata.csv")
   val file = new PrintWriter(f)
 
   file.println("championship,event,eventName,stage,stageName,rank,name,isDnfEntry,vehicleName,stageTime,stageDiff,totalTime,totalDiff,isLastStage,stageRank,stagePercentile,totalPercentile,wheel")
 
-  for {
-    lh <- allLeadeboards
-    l <- lh.leaderboard.entries
-  } {
-    val isLastStage: Boolean = lastStageMap(lh.event.id) == lh.stage.id
-    val stageRank: Int = stageTimesMap(lh.event.id + lh.stage.id).indexWhere(_._1 == l.name)
-    val (stagePercentile: Double, totalPercentile: Double) = if (!l.isDnfEntry) {
-      100 * (1 - stageTimesDescriptive(lh.event.id + lh.stage.id)._1.probability(0, toTimeDouble(l.stageTime))) ->
-        100 * (1 - stageTimesDescriptive(lh.event.id + lh.stage.id)._2.probability(0, toTimeDouble(l.totalTime)))
-    } else {
-      (0d, 0d)
+  allLeaderboardsPlusDnf.foreach { lh =>
+    var dnfIndex = 0
+
+    for {
+      l <- lh.leaderboard.entries
+    } {
+      val isLastStage: Boolean = lastStageMap(lh.event.id) == lh.stage.id
+      val stageTimes = stageTimesMap(lh.event.id -> lh.stage.id)
+      val stageRank: Int = {
+        val index = stageTimes.indexWhere(_._1 == l.name)
+        if (index == -1) {
+          dnfIndex += 1
+          stageTimes.size + dnfIndex
+        } else {
+          index + 1
+        }
+      }
+      val (stagePercentile: Double, totalPercentile: Double) = if (!l.isDnfEntry) {
+        100 * (1 - stageTimesDescriptive(lh.event.id -> lh.stage.id)._1.probability(0, toTimeDouble(l.stageTime))) ->
+          100 * (1 - stageTimesDescriptive(lh.event.id -> lh.stage.id)._2.probability(0, toTimeDouble(l.totalTime)))
+      } else {
+        (0d, 0d)
+      }
+      file.println(List(lh.championship.id, lh.event.id, lh.event.name, lh.stage.id.toInt + 1, lh.stage.name, l.rank, l.name, l.isDnfEntry, l.vehicleName,
+        toTimeDouble(l.stageTime).formatted("%.3f"), toTimeDouble(l.stageDiff).formatted("%.3f"), toTimeDouble(l.totalTime).formatted("%.3f"), toTimeDouble(l.totalDiff).formatted("%.3f"),
+        isLastStage, stageRank, stagePercentile.formatted("%.2f"), totalPercentile.formatted("%.2f"), l.wheel.get.toString).mkString(","))
     }
-    file.println(List(lh.championship.id, lh.event.id, lh.event.name, lh.stage.id, lh.stage.name, l.rank, l.name, l.isDnfEntry, l.vehicleName,
-      toTimeDouble(l.stageTime).formatted("%.3f"), toTimeDouble(l.stageDiff).formatted("%.3f"), toTimeDouble(l.totalTime).formatted("%.3f"), toTimeDouble(l.totalDiff).formatted("%.3f"),
-      isLastStage, stageRank, stagePercentile.formatted("%.2f"), totalPercentile.formatted("%.2f"), l.wheel.get.toString).mkString(","))
   }
 
   file.close()
