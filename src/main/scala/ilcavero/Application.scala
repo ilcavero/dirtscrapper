@@ -53,7 +53,7 @@ object Application extends App {
 
   case class Leaderboard(entries: List[LeaderboardEntries])
 
-  case class LeaderboardHolder(championship: Championship, event: Event, stage: Stage, leaderboard: Leaderboard)
+  case class LeaderboardHolder(championship: Championship, event: Event, stage: Stage, leaderboard: List[LeaderboardEntries])
 
 
   implicit val rwle: ReadWriter[LeaderboardEntries] = macroRW
@@ -61,34 +61,41 @@ object Application extends App {
 
   val championshipId = if (args.size > 1) Some(args(1)) else None
   val eventId = if (args.size > 2) Some(args(2)) else None
+  val stageFilter = if (args.size > 3) Some(args(3)) else None
 
+  println("Found championships:" + root.championships.map(_.id).mkString(","))
   val allLeadeboards: List[LeaderboardHolder] = for {
     championship <- root.championships if championshipId.forall(_ == championship.id)
+    _ = println("Found events:" + championship.events.map(_.id).mkString(","))
     event <- championship.events if eventId.forall(_ == event.id)
-    stage <- event.stages
+    stage <- event.stages if stageFilter.forall(_ == stage.id)
   } yield {
     Thread.sleep(400)
 
-    def postBody(wheel: String): String =
-      s"""{"challengeId":"${event.challengeId}","selectedEventId":0,"stageId":"${stage.id}","page":1,"pageSize":100,"orderByTotalTime":true,"platformFilter":"None","playerFilter":"Everyone","filterByAssists":"Unspecified","filterByWheel":"$wheel","nationalityFilter":"None","eventId":"${event.id}"}"""
+    def postBody(wheel: String, page: Int): String =
+      s"""{"challengeId":"${event.challengeId}","selectedEventId":0,"stageId":"${stage.id}","page":$page,"pageSize":100,"orderByTotalTime":true,"platformFilter":"None","playerFilter":"Everyone","filterByAssists":"Unspecified","filterByWheel":"$wheel","nationalityFilter":"None","eventId":"${event.id}"}"""
 
-    def getLeaderboard(wheel: String): Leaderboard = {
-      Try(requests.post("https://dirtrally2.dirtgame.com/api/Leaderboard", headers = headers, data = postBody(wheel), verifySslCerts = false)) match {
+    def getLeaderboard(wheel: String, page: Int): List[LeaderboardEntries] = {
+      Try(requests.post("https://dirtrally2.dirtgame.com/api/Leaderboard",
+        headers = headers, data = postBody(wheel, page), verifySslCerts = false)) match {
         case Success(resp) =>
-          println(s"${championship.id} ${event.id} ${stage.id} $wheel -> Received a ${resp.statusCode}")
-          val leaderboard: Leaderboard = read[Leaderboard](resp.text)
-          leaderboard
+          println(s"${championship.id} ${event.id} ${stage.id} $page $wheel -> Received a ${resp.statusCode}")
+          val entries: List[LeaderboardEntries] = read[Leaderboard](resp.text).entries
+          if (entries.size == 100)
+            entries ::: getLeaderboard(wheel, page + 1)
+          else
+            entries
         case Failure(exception) =>
-          println(s"${championship.id} ${event.id} ${stage.id} " + exception.getMessage)
-          println(postBody(wheel))
+          println(s"${championship.id} ${event.id} ${stage.id} $page " + exception.getMessage)
+          println(postBody(wheel, page))
           throw exception
       }
     }
 
-    val wheels = getLeaderboard("ON").entries.map(_.name)
+    val wheelsOnly: List[String] = getLeaderboard("ON", 1).map(_.name)
 
-    val leaderboard = getLeaderboard("Unspecified")
-    val leaderboardWithWheels = leaderboard.copy(leaderboard.entries.map(e => e.copy(wheel = Some(wheels.contains(e.name)))))
+    val leaderboard = getLeaderboard("Unspecified", 1)
+    val leaderboardWithWheels = leaderboard.map(e => e.copy(wheel = Some(wheelsOnly.contains(e.name))))
     LeaderboardHolder(championship, event, stage, leaderboardWithWheels)
   }
 
@@ -110,7 +117,7 @@ object Application extends App {
   var stageTimesMap = Map[(String, String), List[(String, Double, Double, Boolean)]]()
   for {
     lh <- allLeadeboards
-    l <- lh.leaderboard.entries
+    l <- lh.leaderboard
   } {
     lastStageMap = lastStageMap.updated(lh.event.id, lh.stage.id)
     val stageTimeDouble = toTimeDouble(l.stageTime)
@@ -126,7 +133,7 @@ object Application extends App {
   val startingDrivers: Map[(Championship, Event), Set[(String, Boolean, String)]] = {
     var result: Map[(Championship, Event), Set[(String, Boolean, String)]] = Map.empty.withDefaultValue(Set.empty)
     for {
-      LeaderboardHolder(championship, event, stage, Leaderboard(entries)) <- allLeadeboards if entries.nonEmpty && stage.id != lastStageMap(event.id)
+      LeaderboardHolder(championship, event, stage, entries) <- allLeadeboards if entries.nonEmpty && stage.id != lastStageMap(event.id)
     } {
       val startingDriverInfo: Set[(String, Boolean, String)] = entries.map {
         entry => (entry.name, entry.wheel.get, entry.vehicleName)
@@ -137,7 +144,7 @@ object Application extends App {
   }
 
   val allLeaderboardsPlusDnf = allLeadeboards.map {
-    case LeaderboardHolder(championship, event, stage, Leaderboard(entries)) if entries.nonEmpty && stage.id == lastStageMap(event.id) =>
+    case LeaderboardHolder(championship, event, stage, entries) if entries.nonEmpty && stage.id == lastStageMap(event.id) =>
       val stageStartingDrivers: Set[(String, Boolean, String)] = startingDrivers(championship -> event)
       val runningDrivers = entries.map(e => e.name).toSet
       var dnfRank = runningDrivers.size
@@ -151,7 +158,7 @@ object Application extends App {
           LeaderboardEntries(dnfRank, name, true, vehicle,
             "30:00.000", "+30:00.000", totalTime, "+" + totalTime, Some(wheel))
       }
-      LeaderboardHolder(championship, event, stage, Leaderboard(entries ++ missingDnfs))
+      LeaderboardHolder(championship, event, stage, entries ++ missingDnfs)
     case lh => lh
   }
 
@@ -171,13 +178,13 @@ object Application extends App {
   val f = new File("leaderboarddata.csv")
   val file = new PrintWriter(f)
 
-  file.println("championship,event,eventName,stage,stageName,rank,name,isDnfEntry,vehicleName,stageTime,stageDiff,totalTime,totalDiff,isLastStage,stageRank,stagePercentile,totalPercentile,wheel")
+  file.println("championship,event,eventName,stage,stageName,rank,name,isDnfEntry,vehicleName,stageTime,stageDiff,totalTime,totalDiff,isLastStage,stageRank,stagePercentile,totalPercentile,wheel,group,drive")
 
   allLeaderboardsPlusDnf.foreach { lh =>
     var dnfIndex = 0
 
     for {
-      l <- lh.leaderboard.entries
+      l <- lh.leaderboard
     } {
       val isLastStage: Boolean = lastStageMap(lh.event.id) == lh.stage.id
       val stageTimes = stageTimesMap(lh.event.id -> lh.stage.id)
@@ -196,12 +203,89 @@ object Application extends App {
       } else {
         (0d, 0d)
       }
+      val group = cars(l.vehicleName)
+      val drive = groups(group)
       file.println(List(lh.championship.id, lh.event.id, lh.event.name, lh.stage.id.toInt + 1, lh.stage.name, l.rank, l.name, l.isDnfEntry, l.vehicleName,
         toTimeDouble(l.stageTime).formatted("%.3f"), toTimeDouble(l.stageDiff).formatted("%.3f"), toTimeDouble(l.totalTime).formatted("%.3f"), toTimeDouble(l.totalDiff).formatted("%.3f"),
-        isLastStage, stageRank, stagePercentile.formatted("%.2f"), totalPercentile.formatted("%.2f"), l.wheel.get.toString).mkString(","))
+        isLastStage, stageRank, stagePercentile.formatted("%.2f"), totalPercentile.formatted("%.2f"), l.wheel.get.toString, group, drive).mkString(","))
     }
   }
 
   file.close()
-}
 
+  lazy val cars = Map(
+    "MINI Cooper S" -> "H1 (FWD)",
+    "Lancia Fulvia HF" -> "H1 (FWD)",
+    "DS 21" -> "H1 (FWD)",
+    "Volkswagen Golf GTI 16V" -> "H2 (FWD)",
+    "Peugeot 205 GTI" -> "H2 (FWD)",
+    "Ford Escort Mk II" -> "H2 (RWD)",
+    "Alpine Renault A110 1600 S" -> "H2 (RWD)",
+    "Fiat 131 Abarth Rally" -> "H2 (RWD)",
+    "Opel Kadett C GT/E" -> "H2 (RWD)",
+    "BMW E30 M3 Evo Rally" -> "H3 (RWD)",
+    "Opel Ascona 400" -> "H3 (RWD)",
+    "Lancia Stratos" -> "H3 (RWD)",
+    "Renault 5 Turbo" -> "H3 (RWD)",
+    "Datsun 240Z" -> "H3 (RWD)",
+    "Ford Sierra Cosworth RS500" -> "H3 (RWD)",
+    "Lancia 037 Evo 2" -> "Group B (RWD)",
+    "Opel Manta 400" -> "Group B (RWD)",
+    "BMW M1 Procar Rally" -> "Group B (RWD)",
+    "Porsche 911 SC RS" -> "Group B (RWD)",
+    "Audi Sport quattro S1 E2" -> "Group B (4WD)",
+    "Peugeot 205 T16 Evo 2" -> "Group B (4WD)",
+    "Lancia Delta S4" -> "Group B (4WD)",
+    "Ford RS200" -> "Group B (4WD)",
+    "MG Metro 6R4" -> "Group B (4WD)",
+    "Ford Fiesta R2" -> "R2",
+    "Opel Adam R2" -> "R2",
+    "Peugeot 208 R2" -> "R2",
+    "Peugeot 306 Maxi" -> "F2 Kit Car",
+    "Seat Ibiza Kit Car" -> "F2 Kit Car",
+    "Volkswagen Golf Kitcar" -> "F2 Kit Car",
+    "Mitsubishi Lancer Evolution VI" -> "Group A",
+    "SUBARU Impreza 1995" -> "Group A",
+    "Lancia Delta HF Integrale" -> "Group A",
+    "Ford Escort RS Cosworth" -> "Group A",
+    "SUBARU Legacy RS" -> "Group A",
+    "SUBARU WRX STI NR4" -> "NR4/R4",
+    "Mitsubishi Lancer Evolution X" -> "NR4/R4",
+    "Ford Focus RS Rally 2001" -> "2000cc",
+    "SUBARU Impreza (2001)" -> "2000cc",
+    "Citroën C4 Rally" -> "2000cc",
+    "ŠKODA Fabia Rally" -> "2000cc",
+    "Ford Focus RS Rally 2007" -> "2000cc",
+    "SUBARU Impreza" -> "2000cc",
+    "Peugeot 206 Rally" -> "2000cc",
+    "SUBARU Impreza S4 Rally" -> "2000cc",
+    "Ford Fiesta R5" -> "R5",
+    "Ford Fiesta R5 MKII" -> "R5",
+    "Peugeot 208 T16 R5" -> "R5",
+    "Mitsubishi Space Star R5" -> "R5",
+    "ŠKODA Fabia R5" -> "R5",
+    "Citroën C3 R5" -> "R5",
+    "Volkswagen Polo GTI R5" -> "R5",
+    "Chevrolet Camaro GT4-R" -> "Rally GT",
+    "Porsche 911 RGT Rally Spec" -> "Rally GT",
+    "Aston Martin V8 Vantage GT4" -> "Rally GT",
+    "Ford Mustang GT4" -> "Rally GT",
+    "BMW M2 Competition" -> "Rally GT"
+  )
+
+  lazy val groups = Map(
+    "H1 (FWD)" -> "FWD",
+    "H2 (FWD)" -> "FWD",
+    "H2 (RWD)" -> "RWD",
+    "H3 (RWD)" -> "RWD",
+    "Group B (RWD)" -> "RWD",
+    "Group B (4WD)" -> "4WD",
+    "R2" -> "FWD",
+    "F2 Kit Car" -> "FWD",
+    "Group A" -> "4WD",
+    "NR4/R4" -> "4WD",
+    "2000cc" -> "4WD",
+    "R5" -> "4WD",
+    "Rally GT" -> "RWD",
+  )
+}
