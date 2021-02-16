@@ -2,11 +2,11 @@ package ilcavero
 
 import java.io.{File, PrintWriter}
 import java.nio.file.Files
-
 import org.apache.commons.math3.distribution.LogNormalDistribution
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
 import upickle.default._
 
+import scala.io.{Source, StdIn}
 import scala.util.{Failure, Success, Try}
 
 object Application extends App {
@@ -59,14 +59,48 @@ object Application extends App {
   implicit val rwle: ReadWriter[LeaderboardEntries] = macroRW
   implicit val rwl: ReadWriter[Leaderboard] = macroRW
 
-  val championshipId = if (args.size > 1) Some(args(1)) else None
-  val eventId = if (args.size > 2) Some(args(2)) else None
-  val stageFilter = if (args.size > 3) Some(args(3)) else None
+  val argChampionshipId = if (args.size > 1) Some(args(1)) else None
+  val argEventId = if (args.size > 2) Some(args(2)) else None
+  val argStageFilter = if (args.size > 3) Some(args(3)) else None
 
-  println("Found championships:" + root.championships.map(_.id).mkString(","))
+  for {
+    championship <- root.championships
+  } {
+    println("Found championship: " + championship.id)
+    championship.events.map(e => s"    ${e.id}:${e.name}:${e.stages.size - 1}").foreach(println)
+  }
+
+  def readNotEmpty(prompt: String): String = {
+    val in = StdIn.readLine(prompt)
+    if(in.isEmpty) readNotEmpty(prompt) else in
+  }
+
+  val (championshipId, eventId, stageFilter) = {
+    val answer = readNotEmpty("Do you want to continue with filters championship:[" + argChampionshipId.getOrElse("") + "] event:[" + argEventId.getOrElse("") + "] stage:[" + argStageFilter.getOrElse("") + "]  y/N? ")
+    if(answer == "y") {
+      (argChampionshipId, argEventId, argStageFilter)
+    } else {
+      println("Enter 0 for no filter")
+      val newChampionshipId = readNotEmpty("Enter championship filter [" + argChampionshipId.getOrElse("") +"]: ")
+      val newEventId = readNotEmpty("Enter event filter [" + argEventId.getOrElse("") +"]: ")
+      val newStageId = readNotEmpty("Enter stage filter [" + argStageFilter.getOrElse("") +"]: ")
+
+      def parse(x: String, default: Option[String]): Option[String] = x match {
+        case "0" => default
+        case "-1" => None
+        case s if s.toIntOption.isDefined => Some(s)
+        case s => throw new IllegalArgumentException(s"$s not a number")
+      }
+      (parse(newChampionshipId, argChampionshipId),
+      parse(newEventId, argEventId),
+      parse(newStageId, argStageFilter))
+    }
+  }
+
+  println(s"Running with filters $championshipId $eventId $stageFilter")
+
   val allLeadeboards: List[LeaderboardHolder] = for {
     championship <- root.championships if championshipId.forall(_ == championship.id)
-    _ = println("Found events:" + championship.events.map(_.id).mkString(","))
     event <- championship.events if eventId.forall(_ == event.id)
     stage <- event.stages if stageFilter.forall(_ == stage.id)
   } yield {
