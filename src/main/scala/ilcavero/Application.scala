@@ -6,7 +6,7 @@ import org.apache.commons.math3.distribution.LogNormalDistribution
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
 import upickle.default._
 
-import scala.io.{Source, StdIn}
+import scala.io.StdIn
 import scala.util.{Failure, Success, Try}
 
 object Application extends App {
@@ -80,14 +80,14 @@ object Application extends App {
     if(answer == "y") {
       (argChampionshipId, argEventId, argStageFilter)
     } else {
-      println("Enter 0 for no filter")
+      println("Enter 0 for default filter or - for no filter")
       val newChampionshipId = readNotEmpty("Enter championship filter [" + argChampionshipId.getOrElse("") +"]: ")
       val newEventId = readNotEmpty("Enter event filter [" + argEventId.getOrElse("") +"]: ")
       val newStageId = readNotEmpty("Enter stage filter [" + argStageFilter.getOrElse("") +"]: ")
 
       def parse(x: String, default: Option[String]): Option[String] = x match {
         case "0" => default
-        case "-1" => None
+        case "-" => None
         case s if s.toIntOption.isDefined => Some(s)
         case s => throw new IllegalArgumentException(s"$s not a number")
       }
