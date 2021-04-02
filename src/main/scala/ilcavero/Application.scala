@@ -1,11 +1,12 @@
 package ilcavero
 
 import java.io.{File, PrintWriter}
-import java.nio.file.Files
 import org.apache.commons.math3.distribution.LogNormalDistribution
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
+import requests.Request
 import upickle.default._
 
+import java.nio.file.Files
 import scala.io.StdIn
 import scala.util.{Failure, Success, Try}
 
@@ -19,6 +20,22 @@ object Application extends App {
     ""
   } else {
     args(0)
+  }
+  val credentials = Files.readString(new File("credentials.txt").toPath).linesIterator.toList
+  val (s, headers) = if (credentials.size == 2) {
+    println("using credentials.txt to login")
+    Login.login(credentials(0), credentials(1))
+  } else {
+    println("Invalid credentials file, looking for postheader.txt")
+    requests.Session() ->
+      Files.readString(new File("postheader.txt").toPath)
+        .linesIterator
+        .toList
+        .tail
+        .map { line =>
+          val name = line.split(':')(0)
+          name -> line.substring(name.size + 2)
+        }
   }
 
   case class Stage(id: String, name: String)
@@ -35,17 +52,7 @@ object Application extends App {
   implicit val rw: ReadWriter[Root] = macroRW
 
 
-  val headers: List[(String, String)] = Files.readString(new File("postheader.txt").toPath)
-    .linesIterator
-    .toList
-    .tail
-    .map { line =>
-      val name = line.split(':')(0)
-      name -> line.substring(name.size + 2)
-    }
-
-
-  val mainTreeJson = requests.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/recentResults", headers = headers, verifySslCerts = false)
+  val mainTreeJson = s.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/recentResults", headers = headers)
 
   val root = read[Root](mainTreeJson)
 
@@ -72,18 +79,18 @@ object Application extends App {
 
   def readNotEmpty(prompt: String): String = {
     val in = StdIn.readLine(prompt)
-    if(in.isEmpty) readNotEmpty(prompt) else in
+    if (in.isEmpty) readNotEmpty(prompt) else in
   }
 
   val (championshipId, eventId, stageFilter) = {
     val answer = readNotEmpty("Do you want to continue with filters championship:[" + argChampionshipId.getOrElse("") + "] event:[" + argEventId.getOrElse("") + "] stage:[" + argStageFilter.getOrElse("") + "]  y/N? ")
-    if(answer == "y") {
+    if (answer == "y") {
       (argChampionshipId, argEventId, argStageFilter)
     } else {
       println("Enter 0 for default filter or - for no filter")
-      val newChampionshipId = readNotEmpty("Enter championship filter [" + argChampionshipId.getOrElse("") +"]: ")
-      val newEventId = readNotEmpty("Enter event filter [" + argEventId.getOrElse("") +"]: ")
-      val newStageId = readNotEmpty("Enter stage filter [" + argStageFilter.getOrElse("") +"]: ")
+      val newChampionshipId = readNotEmpty("Enter championship filter [" + argChampionshipId.getOrElse("") + "]: ")
+      val newEventId = readNotEmpty("Enter event filter [" + argEventId.getOrElse("") + "]: ")
+      val newStageId = readNotEmpty("Enter stage filter [" + argStageFilter.getOrElse("") + "]: ")
 
       def parse(x: String, default: Option[String]): Option[String] = x match {
         case "0" => default
@@ -91,9 +98,10 @@ object Application extends App {
         case s if s.toIntOption.isDefined => Some(s)
         case s => throw new IllegalArgumentException(s"$s not a number")
       }
+
       (parse(newChampionshipId, argChampionshipId),
-      parse(newEventId, argEventId),
-      parse(newStageId, argStageFilter))
+        parse(newEventId, argEventId),
+        parse(newStageId, argStageFilter))
     }
   }
 
@@ -110,8 +118,8 @@ object Application extends App {
       s"""{"challengeId":"${event.challengeId}","selectedEventId":0,"stageId":"${stage.id}","page":$page,"pageSize":100,"orderByTotalTime":true,"platformFilter":"None","playerFilter":"Everyone","filterByAssists":"Unspecified","filterByWheel":"$wheel","nationalityFilter":"None","eventId":"${event.id}"}"""
 
     def getLeaderboard(wheel: String, page: Int): List[LeaderboardEntries] = {
-      Try(requests.post("https://dirtrally2.dirtgame.com/api/Leaderboard",
-        headers = headers, data = postBody(wheel, page), verifySslCerts = false)) match {
+      Try(s.post("https://dirtrally2.dirtgame.com/api/Leaderboard",
+        headers = "Content-Type" -> "application/json;charset=utf-8" :: headers, data = postBody(wheel, page))) match {
         case Success(resp) =>
           println(s"${championship.id} ${event.id} ${stage.id} $page $wheel -> Received a ${resp.statusCode}")
           val entries: List[LeaderboardEntries] = read[Leaderboard](resp.text).entries
@@ -148,7 +156,10 @@ object Application extends App {
   }
 
   var lastStageMap = Map[String, String]()
-  var stageTimesMap = Map[(String, String), List[(String, Double, Double, Boolean)]]()
+
+  case class StageResult(driverName: String, stageTime: Double, totalTime: Double, isDnf: Boolean)
+
+  var stageTimesMap = Map[(String, String), List[StageResult]]()
   for {
     lh <- allLeadeboards
     l <- lh.leaderboard
@@ -158,9 +169,9 @@ object Application extends App {
     val totalTimeDouble = toTimeDouble(l.totalTime)
     stageTimesMap = stageTimesMap.updatedWith(lh.event.id -> lh.stage.id) {
       case Some(rest) =>
-        Some(((l.name, stageTimeDouble, totalTimeDouble, l.isDnfEntry) :: rest).sortBy(_._2))
+        Some(StageResult(l.name, stageTimeDouble, totalTimeDouble, l.isDnfEntry) :: rest)
       case None =>
-        Some((l.name, stageTimeDouble, totalTimeDouble, l.isDnfEntry) :: Nil)
+        Some(StageResult(l.name, stageTimeDouble, totalTimeDouble, l.isDnfEntry) :: Nil)
     }
   }
 
@@ -197,16 +208,20 @@ object Application extends App {
   }
 
   val stageTimesDescriptive: Map[(String, String), (LogNormalDistribution, LogNormalDistribution)] = stageTimesMap.map {
-    case (key, timeTriples) =>
+    case (key, stageResults) if stageResults.length > 2 =>
       val stageStats = new DescriptiveStatistics()
       val totalStats = new DescriptiveStatistics()
-      timeTriples.foreach { triple =>
-        if (!triple._4) {
-          stageStats.addValue(Math.log(triple._2))
-          totalStats.addValue(Math.log(triple._3))
+      stageResults.foreach { result =>
+        if (!result.isDnf) {
+          stageStats.addValue(Math.log(result.stageTime))
+          totalStats.addValue(Math.log(result.totalTime))
         }
       }
-      key -> (new LogNormalDistribution(stageStats.getMean, stageStats.getStandardDeviation) -> new LogNormalDistribution(totalStats.getMean, totalStats.getStandardDeviation))
+      val stageDistribution = new LogNormalDistribution(stageStats.getMean, stageStats.getStandardDeviation)
+      val totalDistribution = new LogNormalDistribution(totalStats.getMean, totalStats.getStandardDeviation)
+      key -> (stageDistribution -> totalDistribution)
+    case (key, stageResults) =>
+      (key, (new LogNormalDistribution(stageResults.minBy(_.stageTime).stageTime, 1), new LogNormalDistribution(stageResults.minBy(_.totalTime).totalTime, 1)))
   }
 
   val f = new File("leaderboarddata.csv")
@@ -221,9 +236,9 @@ object Application extends App {
       l <- lh.leaderboard
     } {
       val isLastStage: Boolean = lastStageMap(lh.event.id) == lh.stage.id
-      val stageTimes = stageTimesMap(lh.event.id -> lh.stage.id)
+      val stageTimes = stageTimesMap(lh.event.id -> lh.stage.id).sortBy(_.stageTime)
       val stageRank: Int = {
-        val index = stageTimes.indexWhere(_._1 == l.name)
+        val index = stageTimes.indexWhere(_.driverName == l.name)
         if (index == -1) {
           dnfIndex += 1
           stageTimes.size + dnfIndex
