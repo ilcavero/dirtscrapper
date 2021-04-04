@@ -38,18 +38,21 @@ object Application extends App {
         }
   }
 
+  case class CEvent(id: String, eventStatus: String)
+  case class CChampionship(id: String, events: List[CEvent])
+
   case class Stage(id: String, name: String)
-
   case class Event(id: String, challengeId: String, name: String, stages: List[Stage])
-
   case class Championship(id: String, events: List[Event])
-
   case class Root(championships: List[Championship])
 
   implicit val sw: ReadWriter[Stage] = macroRW
   implicit val ew: ReadWriter[Event] = macroRW
   implicit val cw: ReadWriter[Championship] = macroRW
   implicit val rw: ReadWriter[Root] = macroRW
+  implicit val cew: ReadWriter[CEvent] = macroRW
+  implicit val ccw: ReadWriter[CChampionship] = macroRW
+
 
 
   val mainTreeJson = s.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/recentResults", headers = headers)
@@ -57,18 +60,14 @@ object Application extends App {
   val root = read[Root](mainTreeJson)
 
   case class LeaderboardEntries(rank: Int, name: String, isDnfEntry: Boolean, vehicleName: String, stageTime: String, stageDiff: String, totalTime: String, totalDiff: String, wheel: Option[Boolean] = None)
-
   case class Leaderboard(entries: List[LeaderboardEntries])
-
   case class LeaderboardHolder(championship: Championship, event: Event, stage: Stage, leaderboard: List[LeaderboardEntries])
-
 
   implicit val rwle: ReadWriter[LeaderboardEntries] = macroRW
   implicit val rwl: ReadWriter[Leaderboard] = macroRW
 
-  val argChampionshipId = if (args.size > 1) Some(args(1)) else None
-  val argEventId = if (args.size > 2) Some(args(2)) else None
-  val argStageFilter = if (args.size > 3) Some(args(3)) else None
+  val all: (String) => Boolean = _ => true
+  def matchId(id: String): String => Boolean = that => id == that
 
   for {
     championship <- root.championships
@@ -77,40 +76,45 @@ object Application extends App {
     championship.events.map(e => s"    ${e.id}:${e.name}:${e.stages.size - 1}").foreach(println)
   }
 
-  def readNotEmpty(prompt: String): String = {
-    val in = StdIn.readLine(prompt)
-    if (in.isEmpty) readNotEmpty(prompt) else in
-  }
-
-  val (championshipId, eventId, stageFilter) = {
-    val answer = readNotEmpty("Do you want to continue with filters championship:[" + argChampionshipId.getOrElse("") + "] event:[" + argEventId.getOrElse("") + "] stage:[" + argStageFilter.getOrElse("") + "]  y/N? ")
-    if (answer == "y") {
-      (argChampionshipId, argEventId, argStageFilter)
+  val (championshipFilter, eventFilter) = {
+    if(args.size > 2) {
+      matchId(args(1)) -> matchId(args(2))
+    } else if(args.size > 1 && args(1) == "auto") {
+      val championshipsJson = s.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/championships", headers = headers)
+      val championships = read[List[CChampionship]](championshipsJson)
+      val actives = for {
+        championship <- championships
+        event <- championship.events if event.eventStatus == "Active"
+      } yield (championship.id, event.id)
+      val (cId, eChallengeId) = actives.headOption.getOrElse(throw new IllegalStateException("no active events, cannot use auto mode"))
+      val eId = root.championships.flatMap(_.events).find(_.challengeId == eChallengeId).map(_.id).get
+      matchId(cId) -> matchId(eId)
     } else {
-      println("Enter 0 for default filter or - for no filter")
-      val newChampionshipId = readNotEmpty("Enter championship filter [" + argChampionshipId.getOrElse("") + "]: ")
-      val newEventId = readNotEmpty("Enter event filter [" + argEventId.getOrElse("") + "]: ")
-      val newStageId = readNotEmpty("Enter stage filter [" + argStageFilter.getOrElse("") + "]: ")
-
-      def parse(x: String, default: Option[String]): Option[String] = x match {
-        case "0" => default
-        case "-" => None
-        case s if s.toIntOption.isDefined => Some(s)
+      def readNotEmpty(prompt: String): String = {
+        val in = StdIn.readLine(prompt)
+        if (in.isEmpty) readNotEmpty(prompt) else in
+      }
+      def parse(x: String): String => Boolean = x match {
+        case "-" => all
+        case s if s.toIntOption.isDefined => matchId(s)
         case s => throw new IllegalArgumentException(s"$s not a number")
       }
-
-      (parse(newChampionshipId, argChampionshipId),
-        parse(newEventId, argEventId),
-        parse(newStageId, argStageFilter))
+      println("Enter - for no filter")
+      val cFilter: String => Boolean = if(args.size > 1) {
+        println(s"Matching championship ${args(1)}")
+        id => id == args(1)
+      } else {
+        parse(readNotEmpty(s"Enter championship id: "))
+      }
+      val eFilter = parse(readNotEmpty(s"Enter event id: "))
+      (cFilter, eFilter)
     }
   }
 
-  println(s"Running with filters $championshipId $eventId $stageFilter")
-
   val allLeadeboards: List[LeaderboardHolder] = for {
-    championship <- root.championships if championshipId.forall(_ == championship.id)
-    event <- championship.events if eventId.forall(_ == event.id)
-    stage <- event.stages if stageFilter.forall(_ == stage.id)
+    championship <- root.championships if championshipFilter(championship.id)
+    event <- championship.events if eventFilter(event.id)
+    stage <- event.stages
   } yield {
     Thread.sleep(400)
 
