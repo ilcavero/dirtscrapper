@@ -3,7 +3,6 @@ package ilcavero
 import java.io.{File, PrintWriter}
 import org.apache.commons.math3.distribution.LogNormalDistribution
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
-import requests.Request
 import upickle.default._
 
 import java.nio.file.Files
@@ -21,14 +20,17 @@ object Application extends App {
   } else {
     args(0)
   }
-  val credentials = Files.readString(new File("credentials.txt").toPath).linesIterator.toList
-  val (s, headers) = if (credentials.size == 2) {
+
+  private val credentialsFile = new File(System.getProperty("ilcavero.credentials", "credentials.txt"))
+  val (s, headers) = if (credentialsFile.exists()) {
+    val credentials = Files.readString(credentialsFile.toPath).linesIterator.toList
     println("using credentials.txt to login")
     Login.login(credentials(0), credentials(1))
   } else {
     println("Invalid credentials file, looking for postheader.txt")
+    val postHeaderPath = new File("postheader.txt").toPath
     requests.Session() ->
-      Files.readString(new File("postheader.txt").toPath)
+      Files.readString(postHeaderPath)
         .linesIterator
         .toList
         .tail
@@ -69,12 +71,6 @@ object Application extends App {
   val all: (String) => Boolean = _ => true
   def matchId(id: String): String => Boolean = that => id == that
 
-  for {
-    championship <- root.championships
-  } {
-    println("Found championship: " + championship.id)
-    championship.events.map(e => s"    ${e.id}:${e.name}:${e.stages.size - 1}").foreach(println)
-  }
 
   val (championshipFilter, eventFilter) = {
     if(args.size > 2) {
@@ -90,6 +86,12 @@ object Application extends App {
       val eId = root.championships.flatMap(_.events).find(_.challengeId == eChallengeId).map(_.id).get
       matchId(cId) -> matchId(eId)
     } else {
+      for {
+        championship <- root.championships
+      } {
+        println("Found championship: " + championship.id)
+        championship.events.map(e => s"    ${e.id}:${e.name}:${e.stages.size - 1}").foreach(println)
+      }
       def readNotEmpty(prompt: String): String = {
         val in = StdIn.readLine(prompt)
         if (in.isEmpty) readNotEmpty(prompt) else in
@@ -228,7 +230,7 @@ object Application extends App {
       (key, (new LogNormalDistribution(stageResults.minBy(_.stageTime).stageTime, 1), new LogNormalDistribution(stageResults.minBy(_.totalTime).totalTime, 1)))
   }
 
-  val f = new File("leaderboarddata.csv")
+  val f = new File(System.getProperty("ilcavero.output", "leaderboarddata.csv"))
   val file = new PrintWriter(f)
 
   file.println("championship,event,eventName,stage,stageName,rank,name,isDnfEntry,vehicleName,stageTime,stageDiff,totalTime,totalDiff,isLastStage,stageRank,stagePercentile,totalPercentile,wheel,group,drive")
