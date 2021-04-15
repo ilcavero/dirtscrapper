@@ -24,7 +24,7 @@ object Application extends App {
   private val credentialsFile = new File(System.getProperty("ilcavero.credentials", "credentials.txt"))
   val (s, headers) = if (credentialsFile.exists()) {
     val credentials = Files.readString(credentialsFile.toPath).linesIterator.toList
-    println("using credentials.txt to login")
+    println(s"using ${credentialsFile.toPath} to login")
     Login.login(credentials(0), credentials(1))
   } else {
     println("Invalid credentials file, looking for postheader.txt")
@@ -74,15 +74,22 @@ object Application extends App {
 
   val (championshipFilter, eventFilter) = {
     if(args.size > 2) {
+      println("downloading specified championship and event IDs")
       matchId(args(1)) -> matchId(args(2))
-    } else if(args.size > 1 && args(1) == "auto") {
+    } else if(args.size > 1 && args(1).startsWith("auto")) {
       val championshipsJson = s.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/championships", headers = headers)
       val championships = read[List[CChampionship]](championshipsJson)
-      val actives = for {
-        championship <- championships
-        event <- championship.events if event.eventStatus == "Active"
-      } yield (championship.id, event.id)
-      val (cId, eChallengeId) = actives.headOption.getOrElse(throw new IllegalStateException("no active events, cannot use auto mode"))
+      val (championship, Some(activeEvent)) = championships.map(c => (c, c.events.find(e => e.eventStatus == "Active")))
+          .find(_._2.nonEmpty)
+          .getOrElse(throw new IllegalStateException("no active events, cannot use auto mode"))
+      val (cId, eChallengeId) = if(args(1) == "auto") {
+        println("downloading active event")
+        (championship.id, activeEvent.id)
+      } else {
+        println("downloading last active event")
+        val previousEvent = championship.events.takeWhile(e => e != activeEvent).lastOption.getOrElse(throw new IllegalStateException("No previous active event"))
+        (championship.id, previousEvent.id)
+      }
       val eId = root.championships.flatMap(_.events).find(_.challengeId == eChallengeId).map(_.id).get
       matchId(cId) -> matchId(eId)
     } else {
