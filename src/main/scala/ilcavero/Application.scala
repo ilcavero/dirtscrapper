@@ -86,7 +86,7 @@ object Application extends App {
         println("downloading active event")
         (championship.id, activeEvent.id)
       } else {
-        println("downloading last active event")
+        println("downloading last4 active event")
         val previousEvent = championship.events.takeWhile(e => e != activeEvent).lastOption.getOrElse(throw new IllegalStateException("No previous active event"))
         (championship.id, previousEvent.id)
       }
@@ -221,7 +221,7 @@ object Application extends App {
   }
 
   val stageTimesDescriptive: Map[(String, String), (LogNormalDistribution, LogNormalDistribution)] = stageTimesMap.map {
-    case (key, stageResults) if stageResults.length > 2 =>
+    case (key, stageResults) if stageResults.count(!_.isDnf) > 1 =>
       val stageStats = new DescriptiveStatistics()
       val totalStats = new DescriptiveStatistics()
       stageResults.foreach { result =>
@@ -230,6 +230,8 @@ object Application extends App {
           totalStats.addValue(Math.log(result.totalTime))
         }
       }
+      println(stageStats.getN)
+      println(stageStats.getStandardDeviation)
       val stageDistribution = new LogNormalDistribution(stageStats.getMean, stageStats.getStandardDeviation)
       val totalDistribution = new LogNormalDistribution(totalStats.getMean, totalStats.getStandardDeviation)
       key -> (stageDistribution -> totalDistribution)
