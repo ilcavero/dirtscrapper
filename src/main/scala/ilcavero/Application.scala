@@ -230,8 +230,6 @@ object Application extends App {
           totalStats.addValue(Math.log(result.totalTime))
         }
       }
-      println(stageStats.getN)
-      println(stageStats.getStandardDeviation)
       val stageDistribution = new LogNormalDistribution(stageStats.getMean, stageStats.getStandardDeviation)
       val totalDistribution = new LogNormalDistribution(totalStats.getMean, totalStats.getStandardDeviation)
       key -> (stageDistribution -> totalDistribution)
