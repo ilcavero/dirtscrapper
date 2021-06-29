@@ -68,7 +68,7 @@ object Application extends App {
   implicit val rwle: ReadWriter[LeaderboardEntries] = macroRW
   implicit val rwl: ReadWriter[Leaderboard] = macroRW
 
-  val all: (String) => Boolean = _ => true
+  val all: String => Boolean = _ => true
   def matchId(id: String): String => Boolean = that => id == that
 
 
@@ -92,6 +92,8 @@ object Application extends App {
       }
       val eId = root.championships.flatMap(_.events).find(_.challengeId == eChallengeId).map(_.id).get
       matchId(cId) -> matchId(eId)
+    } else if(args.size > 1 && args(1) == "all") {
+      ((_: String) => true, (_: String) => true)
     } else {
       for {
         championship <- root.championships
@@ -222,16 +224,19 @@ object Application extends App {
 
   val stageTimesDescriptive: Map[(String, String), (LogNormalDistribution, LogNormalDistribution)] = stageTimesMap.map {
     case (key, stageResults) if stageResults.count(!_.isDnf) > 1 =>
-      val stageStats = new DescriptiveStatistics()
-      val totalStats = new DescriptiveStatistics()
-      stageResults.foreach { result =>
-        if (!result.isDnf) {
-          stageStats.addValue(Math.log(result.stageTime))
-          totalStats.addValue(Math.log(result.totalTime))
+      def createDistribution(getTime: StageResult => Double): LogNormalDistribution = {
+        val stats = new DescriptiveStatistics()
+        val reasonableMaxMultiplier = 1.25 // Times beyond this will not be part of the model and will get 0.0
+        val reasonableMax = stageResults.filter(!_.isDnf).map(getTime).min * reasonableMaxMultiplier
+        stageResults.foreach { result =>
+          if (!result.isDnf && getTime(result) < reasonableMax) {
+            stats.addValue(Math.log(getTime(result)))
+          }
         }
+        new LogNormalDistribution(stats.getMean, stats.getStandardDeviation)
       }
-      val stageDistribution = new LogNormalDistribution(stageStats.getMean, stageStats.getStandardDeviation)
-      val totalDistribution = new LogNormalDistribution(totalStats.getMean, totalStats.getStandardDeviation)
+      val stageDistribution = createDistribution(_.stageTime)
+      val totalDistribution = createDistribution(_.totalTime)
       key -> (stageDistribution -> totalDistribution)
     case (key, stageResults) =>
       (key, (new LogNormalDistribution(stageResults.minBy(_.stageTime).stageTime, 1), new LogNormalDistribution(stageResults.minBy(_.totalTime).totalTime, 1)))
