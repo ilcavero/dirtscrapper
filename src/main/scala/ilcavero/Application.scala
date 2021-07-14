@@ -6,6 +6,7 @@ import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
 import upickle.default._
 
 import java.nio.file.Files
+import scala.annotation.tailrec
 import scala.io.StdIn
 import scala.util.{Failure, Success, Try}
 
@@ -86,7 +87,7 @@ object Application extends App {
         println("downloading active event")
         (championship.id, activeEvent.id)
       } else {
-        println("downloading last4 active event")
+        println("downloading last active event")
         val previousEvent = championship.events.takeWhile(e => e != activeEvent).lastOption.getOrElse(throw new IllegalStateException("No previous active event"))
         (championship.id, previousEvent.id)
       }
@@ -101,6 +102,7 @@ object Application extends App {
         println("Found championship: " + championship.id)
         championship.events.map(e => s"    ${e.id}:${e.name}:${e.stages.size - 1}").foreach(println)
       }
+      @tailrec
       def readNotEmpty(prompt: String): String = {
         val in = StdIn.readLine(prompt)
         if (in.isEmpty) readNotEmpty(prompt) else in
@@ -215,8 +217,8 @@ object Application extends App {
           val hourTotalTime = totaltimeMin / 60
           val minTotalTime = totaltimeMin % 60
           val totalTime = hourTotalTime.formatted("%02d") + ":" + minTotalTime.formatted("%02d") + ":00.000"
-          LeaderboardEntries(dnfRank, name, true, vehicle,
-            "30:00.000", "+30:00.000", totalTime, "+" + totalTime, Some(wheel))
+          LeaderboardEntries(dnfRank, name, isDnfEntry = true, vehicleName = vehicle,
+            stageTime = "30:00.000", stageDiff = "+30:00.000", totalTime = totalTime, totalDiff = "+" + totalTime, wheel = Some(wheel))
       }
       LeaderboardHolder(championship, event, stage, entries ++ missingDnfs)
     case lh => lh
@@ -226,7 +228,7 @@ object Application extends App {
     case (key, stageResults) if stageResults.count(!_.isDnf) > 1 =>
       def createDistribution(getTime: StageResult => Double): LogNormalDistribution = {
         val stats = new DescriptiveStatistics()
-        val reasonableMaxMultiplier = 1.25 // Times beyond this will not be part of the model and will get 0.0
+        val reasonableMaxMultiplier = 1.22 // Times beyond this will not be part of the model and will get 0.0
         val reasonableMax = stageResults.filter(!_.isDnf).map(getTime).min * reasonableMaxMultiplier
         stageResults.foreach { result =>
           if (!result.isDnf && getTime(result) < reasonableMax) {
@@ -333,7 +335,7 @@ object Application extends App {
     "ŠKODA Fabia R5" -> "R5",
     "Citroën C3 R5" -> "R5",
     "Volkswagen Polo GTI R5" -> "R5",
-    "Chevrolet Camaro GT4-R" -> "Rally GT",
+    "Chevrolet Camaro GT4.R" -> "Rally GT",
     "Porsche 911 RGT Rally Spec" -> "Rally GT",
     "Aston Martin V8 Vantage GT4" -> "Rally GT",
     "Ford Mustang GT4" -> "Rally GT",
