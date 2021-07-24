@@ -22,11 +22,11 @@ object Application extends App {
     args(0)
   }
 
-  private val credentialsFile = new File(System.getProperty("ilcavero.credentials", "credentials.txt"))
+  val credentialsFile = new File(System.getProperty("ilcavero.credentials", "credentials.txt"))
   val (s, headers) = if (credentialsFile.exists()) {
-    val credentials = Files.readString(credentialsFile.toPath).linesIterator.toList
+    val List(email, password) = Files.readString(credentialsFile.toPath).linesIterator.toList
     println(s"using ${credentialsFile.toPath} to login")
-    Login.login(credentials(0), credentials(1))
+    Login.login(email, password)
   } else {
     println("Invalid credentials file, looking for postheader.txt")
     val postHeaderPath = new File("postheader.txt").toPath
@@ -37,7 +37,7 @@ object Application extends App {
         .tail
         .map { line =>
           val name = line.split(':')(0)
-          name -> line.substring(name.size + 2)
+          name -> line.substring(name.length + 2)
         }
   }
 
@@ -74,10 +74,10 @@ object Application extends App {
 
 
   val (championshipFilter, eventFilter) = {
-    if(args.size > 2) {
+    if(args.length > 2) {
       println("downloading specified championship and event IDs")
       matchId(args(1)) -> matchId(args(2))
-    } else if(args.size > 1 && args(1).startsWith("auto")) {
+    } else if(args.length > 1 && args(1).startsWith("auto")) {
       val championshipsJson = s.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/championships", headers = headers)
       val championships = read[List[CChampionship]](championshipsJson)
       val (championship, Some(activeEvent)) = championships.map(c => (c, c.events.find(e => e.eventStatus == "Active")))
@@ -93,7 +93,7 @@ object Application extends App {
       }
       val eId = root.championships.flatMap(_.events).find(_.challengeId == eChallengeId).map(_.id).get
       matchId(cId) -> matchId(eId)
-    } else if(args.size > 1 && args(1) == "all") {
+    } else if(args.length > 1 && args(1) == "all") {
       ((_: String) => true, (_: String) => true)
     } else {
       for {
@@ -113,7 +113,7 @@ object Application extends App {
         case s => throw new IllegalArgumentException(s"$s not a number")
       }
       println("Enter - for no filter")
-      val cFilter: String => Boolean = if(args.size > 1) {
+      val cFilter: String => Boolean = if(args.length > 1) {
         println(s"Matching championship ${args(1)}")
         id => id == args(1)
       } else {
@@ -225,29 +225,31 @@ object Application extends App {
   }
 
   val stageTimesDescriptive: Map[(String, String), (LogNormalDistribution, LogNormalDistribution)] = stageTimesMap.map {
-    case (key, stageResults) if stageResults.count(!_.isDnf) > 1 =>
+    case (key, stageResults) =>
       def createDistribution(getTime: StageResult => Double): LogNormalDistribution = {
         val stats = new DescriptiveStatistics()
-        val reasonableMaxMultiplier = 1.22 // Times beyond this will not be part of the model and will get 0.0
+        val reasonableMaxMultiplier = 1.25 // Times beyond this will not be part of the model and will get 0.0
         val reasonableMax = stageResults.filter(!_.isDnf).map(getTime).min * reasonableMaxMultiplier
         stageResults.foreach { result =>
           if (!result.isDnf && getTime(result) < reasonableMax) {
             stats.addValue(Math.log(getTime(result)))
           }
         }
-        new LogNormalDistribution(stats.getMean, stats.getStandardDeviation)
+        if(stats.getN() > 1)
+          new LogNormalDistribution(stats.getMean, stats.getStandardDeviation)
+        else
+          new LogNormalDistribution(stats.getMean, 1)
+
       }
       val stageDistribution = createDistribution(_.stageTime)
       val totalDistribution = createDistribution(_.totalTime)
       key -> (stageDistribution -> totalDistribution)
-    case (key, stageResults) =>
-      (key, (new LogNormalDistribution(stageResults.minBy(_.stageTime).stageTime, 1), new LogNormalDistribution(stageResults.minBy(_.totalTime).totalTime, 1)))
   }
 
   val f = new File(System.getProperty("ilcavero.output", "leaderboarddata.csv"))
   val file = new PrintWriter(f)
 
-  file.println("championship,event,eventName,stage,stageName,rank,name,isDnfEntry,vehicleName,stageTime,stageDiff,totalTime,totalDiff,isLastStage,stageRank,stagePercentile,totalPercentile,wheel,group,drive")
+  file.println("championship,event,eventName,stage,stageName,rank,name,isDnfEntry,vehicleName,stageTime,stageDiff,totalTime,totalDiff,isLastStage,stageRank,stagePercentile,totalPercentile,wheel,group,drive,stageMean,stageStdDev,totalMean,totalDev")
 
   allLeaderboardsPlusDnf.foreach { lh =>
     var dnfIndex = 0
@@ -266,17 +268,20 @@ object Application extends App {
           index + 1
         }
       }
+      val (stageTimeDistribution, totalTimeDistribution) = stageTimesDescriptive(lh.event.id -> lh.stage.id)
       val (stagePercentile: Double, totalPercentile: Double) = if (!l.isDnfEntry) {
-        100 * (1 - stageTimesDescriptive(lh.event.id -> lh.stage.id)._1.probability(0, toTimeDouble(l.stageTime))) ->
-          100 * (1 - stageTimesDescriptive(lh.event.id -> lh.stage.id)._2.probability(0, toTimeDouble(l.totalTime)))
+          100 * (1 - stageTimeDistribution.probability(0, toTimeDouble(l.stageTime))) ->
+          100 * (1 - totalTimeDistribution.probability(0, toTimeDouble(l.totalTime)))
       } else {
         (0d, 0d)
       }
+
       val group = cars(l.vehicleName)
       val drive = groups(group)
       file.println(List(lh.championship.id, lh.event.id, lh.event.name, lh.stage.id.toInt + 1, lh.stage.name, l.rank, l.name, l.isDnfEntry, l.vehicleName,
         toTimeDouble(l.stageTime).formatted("%.3f"), toTimeDouble(l.stageDiff).formatted("%.3f"), toTimeDouble(l.totalTime).formatted("%.3f"), toTimeDouble(l.totalDiff).formatted("%.3f"),
-        isLastStage, stageRank, stagePercentile.formatted("%.2f"), totalPercentile.formatted("%.2f"), l.wheel.get.toString, group, drive).mkString(","))
+        isLastStage, stageRank, stagePercentile.formatted("%.2f"), totalPercentile.formatted("%.2f"), l.wheel.get.toString, group, drive,
+        stageTimeDistribution.getScale().formatted("%.6f"), stageTimeDistribution.getShape().formatted("%.6f"), totalTimeDistribution.getScale().formatted("%.6f"),totalTimeDistribution.getShape().formatted("%.6f")).mkString(","))
     }
   }
 

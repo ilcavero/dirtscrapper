@@ -13,7 +13,7 @@ object ClubScrapper extends App {
     .tail
     .map { line =>
       val name = line.split(':')(0)
-      name -> line.substring(name.size + 2)
+      name -> line.substring(name.length + 2)
     }
 
   private def request(page:Int) = requests.post(s"https://dirtrally2.dirtgame.com/api/Club/Search",
