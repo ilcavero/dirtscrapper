@@ -229,7 +229,7 @@ object Application extends App {
       def createDistribution(getTime: StageResult => Double): LogNormalDistribution = {
         val stats = new DescriptiveStatistics()
         val reasonableMaxMultiplier = 1.25 // Times beyond this will not be part of the model and will get 0.0
-        val reasonableMax = stageResults.filter(!_.isDnf).map(getTime).min * reasonableMaxMultiplier
+        val reasonableMax = stageResults.filter(!_.isDnf).map(getTime).minOption.map(_ * reasonableMaxMultiplier).getOrElse(0d)
         stageResults.foreach { result =>
           if (!result.isDnf && getTime(result) < reasonableMax) {
             stats.addValue(Math.log(getTime(result)))
