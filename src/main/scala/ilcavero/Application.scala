@@ -1,5 +1,7 @@
 package ilcavero
 
+import ilcavero.LeaderboardLoader.scrape
+
 import java.io.{File, PrintWriter}
 import org.apache.commons.math3.distribution.LogNormalDistribution
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
@@ -12,8 +14,6 @@ import scala.util.{Failure, Success, Try}
 
 object Application extends App {
 
-  println("Starting the scraper....")
-
   val clubId: String = if (args.isEmpty) {
     println("please pass the club ID as java arg")
     System.exit(1)
@@ -22,33 +22,25 @@ object Application extends App {
     args(0)
   }
 
-  val credentialsFile = new File(System.getProperty("ilcavero.credentials", "credentials.txt"))
-  val (s, headers) = if (credentialsFile.exists()) {
-    val List(email, password) = Files.readString(credentialsFile.toPath).linesIterator.toList
-    println(s"using ${credentialsFile.toPath} to login")
-    Login.login(email, password)
-  } else {
-    println("Invalid credentials file, looking for postheader.txt")
-    val postHeaderPath = new File("postheader.txt").toPath
-    requests.Session() ->
-      Files.readString(postHeaderPath)
-        .linesIterator
-        .toList
-        .tail
-        .map { line =>
-          val name = line.split(':')(0)
-          name -> line.substring(name.length + 2)
-        }
-  }
+  println("Starting the scraper....")
+  val lhs = scrape(clubId, args)
+  LeaderboardLoader.generateCsv(lhs)
+  EloScrapper.processEventsResults(lhs)
+}
 
-  case class CEvent(id: String, eventStatus: String)
-  case class CChampionship(id: String, events: List[CEvent])
+case class LeaderboardEntries(rank: Int, name: String, isDnfEntry: Boolean, vehicleName: String, stageTime: String, stageDiff: String, totalTime: String, totalDiff: String, wheel: Option[Boolean] = None)
+case class Leaderboard(entries: List[LeaderboardEntries])
+case class LeaderboardHolder(championship: Championship, event: Event, stage: Stage, leaderboard: List[LeaderboardEntries], activeEvent: Boolean)
 
-  case class Stage(id: String, name: String)
-  case class Event(id: String, challengeId: String, name: String, stages: List[Stage])
-  case class Championship(id: String, events: List[Event])
-  case class Root(championships: List[Championship])
+case class CEvent(id: String, eventStatus: String)
+case class CChampionship(id: String, events: List[CEvent])
 
+case class Stage(id: String, name: String)
+case class Event(id: String, challengeId: String, name: String, stages: List[Stage])
+case class Championship(id: String, events: List[Event])
+case class Root(championships: List[Championship])
+
+object LeaderboardLoader {
   implicit val sw: ReadWriter[Stage] = macroRW
   implicit val ew: ReadWriter[Event] = macroRW
   implicit val cw: ReadWriter[Championship] = macroRW
@@ -56,236 +48,269 @@ object Application extends App {
   implicit val cew: ReadWriter[CEvent] = macroRW
   implicit val ccw: ReadWriter[CChampionship] = macroRW
 
-
-
-  val mainTreeJson = s.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/recentResults", headers = headers)
-
-  val root = read[Root](mainTreeJson)
-
-  case class LeaderboardEntries(rank: Int, name: String, isDnfEntry: Boolean, vehicleName: String, stageTime: String, stageDiff: String, totalTime: String, totalDiff: String, wheel: Option[Boolean] = None)
-  case class Leaderboard(entries: List[LeaderboardEntries])
-  case class LeaderboardHolder(championship: Championship, event: Event, stage: Stage, leaderboard: List[LeaderboardEntries])
-
   implicit val rwle: ReadWriter[LeaderboardEntries] = macroRW
   implicit val rwl: ReadWriter[Leaderboard] = macroRW
 
-  val all: String => Boolean = _ => true
-  def matchId(id: String): String => Boolean = that => id == that
 
-
-  val (championshipFilter, eventFilter) = {
-    if(args.length > 2) {
-      println("downloading specified championship and event IDs")
-      matchId(args(1)) -> matchId(args(2))
-    } else if(args.length > 1 && args(1).startsWith("auto")) {
-      val championshipsJson = s.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/championships", headers = headers)
-      val championships = read[List[CChampionship]](championshipsJson)
-      val (championship, Some(activeEvent)) = championships.map(c => (c, c.events.find(e => e.eventStatus == "Active")))
-          .find(_._2.nonEmpty)
-          .getOrElse(throw new IllegalStateException("no active events, cannot use auto mode"))
-      val (cId, eChallengeId) = if(args(1) == "auto") {
-        println("downloading active event")
-        (championship.id, activeEvent.id)
-      } else {
-        println("downloading last active event")
-        val previousEvent = championship.events.takeWhile(e => e != activeEvent).lastOption.getOrElse(throw new IllegalStateException("No previous active event"))
-        (championship.id, previousEvent.id)
-      }
-      val eId = root.championships.flatMap(_.events).find(_.challengeId == eChallengeId).map(_.id).get
-      matchId(cId) -> matchId(eId)
-    } else if(args.length > 1 && args(1) == "all") {
-      ((_: String) => true, (_: String) => true)
+  def scrape(clubId: String, args: Array[String]): List[LeaderboardHolder] = {
+    val credentialsFile = new File(System.getProperty("ilcavero.credentials", "credentials.txt"))
+    val (s, headers) = if (credentialsFile.exists()) {
+      val List(email, password) = Files.readString(credentialsFile.toPath).linesIterator.toList
+      println(s"using ${credentialsFile.toPath} to login")
+      Login.login(email, password)
     } else {
-      for {
-        championship <- root.championships
-      } {
-        println("Found championship: " + championship.id)
-        championship.events.map(e => s"    ${e.id}:${e.name}:${e.stages.size - 1}").foreach(println)
-      }
-      @tailrec
-      def readNotEmpty(prompt: String): String = {
-        val in = StdIn.readLine(prompt)
-        if (in.isEmpty) readNotEmpty(prompt) else in
-      }
-      def parse(x: String): String => Boolean = x match {
-        case "-" => all
-        case s if s.toIntOption.isDefined => matchId(s)
-        case s => throw new IllegalArgumentException(s"$s not a number")
-      }
-      println("Enter - for no filter")
-      val cFilter: String => Boolean = if(args.length > 1) {
-        println(s"Matching championship ${args(1)}")
-        id => id == args(1)
-      } else {
-        parse(readNotEmpty(s"Enter championship id: "))
-      }
-      val eFilter = parse(readNotEmpty(s"Enter event id: "))
-      (cFilter, eFilter)
-    }
-  }
-
-  val allLeadeboards: List[LeaderboardHolder] = for {
-    championship <- root.championships if championshipFilter(championship.id)
-    event <- championship.events if eventFilter(event.id)
-    stage <- event.stages
-  } yield {
-    Thread.sleep(400)
-
-    def postBody(wheel: String, page: Int): String =
-      s"""{"challengeId":"${event.challengeId}","selectedEventId":0,"stageId":"${stage.id}","page":$page,"pageSize":100,"orderByTotalTime":true,"platformFilter":"None","playerFilter":"Everyone","filterByAssists":"Unspecified","filterByWheel":"$wheel","nationalityFilter":"None","eventId":"${event.id}"}"""
-
-    def getLeaderboard(wheel: String, page: Int): List[LeaderboardEntries] = {
-      Try(s.post("https://dirtrally2.dirtgame.com/api/Leaderboard",
-        headers = "Content-Type" -> "application/json;charset=utf-8" :: headers, data = postBody(wheel, page))) match {
-        case Success(resp) =>
-          println(s"${championship.id} ${event.id} ${stage.id} $page $wheel -> Received a ${resp.statusCode}")
-          val entries: List[LeaderboardEntries] = read[Leaderboard](resp.text).entries
-          if (entries.size == 100)
-            entries ::: getLeaderboard(wheel, page + 1)
-          else
-            entries
-        case Failure(exception) =>
-          println(s"${championship.id} ${event.id} ${stage.id} $page " + exception.getMessage)
-          println(postBody(wheel, page))
-          throw exception
-      }
-    }
-
-    val wheelsOnly: List[String] = getLeaderboard("ON", 1).map(_.name)
-
-    val leaderboard = getLeaderboard("Unspecified", 1)
-    val leaderboardWithWheels = leaderboard.map(e => e.copy(wheel = Some(wheelsOnly.contains(e.name))))
-    LeaderboardHolder(championship, event, stage, leaderboardWithWheels)
-  }
-
-  //adds isLastStage, stageRank, timesInSecs totalStageDrivers, time percentiles
-
-  val hourPattern = raw"""\+?(\d\d):(\d\d):(\d\d\.\d\d\d)""".r
-  val timePattern = raw"""\+?(\d\d):(\d\d\.\d\d\d)""".r
-
-  def toTimeDouble(s: String): Double = s match {
-    case hourPattern(hours, minutes, seconds) =>
-      hours.toDouble * 3600 + minutes.toDouble * 60 + seconds.toDouble
-    case timePattern(minutes, seconds) =>
-      minutes.toDouble * 60 + seconds.toDouble
-    case "--" =>
-      0
-  }
-
-  var lastStageMap = Map[String, String]()
-
-  case class StageResult(driverName: String, stageTime: Double, totalTime: Double, isDnf: Boolean)
-
-  var stageTimesMap = Map[(String, String), List[StageResult]]()
-  for {
-    lh <- allLeadeboards
-    l <- lh.leaderboard
-  } {
-    lastStageMap = lastStageMap.updated(lh.event.id, lh.stage.id)
-    val stageTimeDouble = toTimeDouble(l.stageTime)
-    val totalTimeDouble = toTimeDouble(l.totalTime)
-    stageTimesMap = stageTimesMap.updatedWith(lh.event.id -> lh.stage.id) {
-      case Some(rest) =>
-        Some(StageResult(l.name, stageTimeDouble, totalTimeDouble, l.isDnfEntry) :: rest)
-      case None =>
-        Some(StageResult(l.name, stageTimeDouble, totalTimeDouble, l.isDnfEntry) :: Nil)
-    }
-  }
-
-  val startingDrivers: Map[(Championship, Event), Set[(String, Boolean, String)]] = {
-    var result: Map[(Championship, Event), Set[(String, Boolean, String)]] = Map.empty.withDefaultValue(Set.empty)
-    for {
-      LeaderboardHolder(championship, event, stage, entries) <- allLeadeboards if entries.nonEmpty && stage.id != lastStageMap(event.id)
-    } {
-      val startingDriverInfo: Set[(String, Boolean, String)] = entries.map {
-        entry => (entry.name, entry.wheel.get, entry.vehicleName)
-      }.toSet
-      result = result.updated(championship -> event, result(championship -> event) ++ startingDriverInfo)
-    }
-    result
-  }
-
-  val allLeaderboardsPlusDnf = allLeadeboards.map {
-    case LeaderboardHolder(championship, event, stage, entries) if entries.nonEmpty && stage.id == lastStageMap(event.id) =>
-      val stageStartingDrivers: Set[(String, Boolean, String)] = startingDrivers(championship -> event)
-      val runningDrivers = entries.map(e => e.name).toSet
-      var dnfRank = runningDrivers.size
-      val missingDnfs: Set[LeaderboardEntries] = stageStartingDrivers.collect {
-        case (name, wheel, vehicle) if !runningDrivers.contains(name) =>
-          dnfRank += 1
-          val totaltimeMin = 30 * (stage.id.toInt + 1)
-          val hourTotalTime = totaltimeMin / 60
-          val minTotalTime = totaltimeMin % 60
-          val totalTime = hourTotalTime.formatted("%02d") + ":" + minTotalTime.formatted("%02d") + ":00.000"
-          LeaderboardEntries(dnfRank, name, isDnfEntry = true, vehicleName = vehicle,
-            stageTime = "30:00.000", stageDiff = "+30:00.000", totalTime = totalTime, totalDiff = "+" + totalTime, wheel = Some(wheel))
-      }
-      LeaderboardHolder(championship, event, stage, entries ++ missingDnfs)
-    case lh => lh
-  }
-
-  val stageTimesDescriptive: Map[(String, String), (LogNormalDistribution, LogNormalDistribution)] = stageTimesMap.map {
-    case (key, stageResults) =>
-      def createDistribution(getTime: StageResult => Double): LogNormalDistribution = {
-        val stats = new DescriptiveStatistics()
-        val reasonableMaxMultiplier = 1.25 // Times beyond this will not be part of the model and will get 0.0
-        val reasonableMax = stageResults.filter(!_.isDnf).map(getTime).minOption.map(_ * reasonableMaxMultiplier).getOrElse(0d)
-        stageResults.foreach { result =>
-          if (!result.isDnf && getTime(result) < reasonableMax) {
-            stats.addValue(Math.log(getTime(result)))
+      println("Invalid credentials file, looking for postheader.txt")
+      val postHeaderPath = new File("postheader.txt").toPath
+      requests.Session() ->
+        Files.readString(postHeaderPath)
+          .linesIterator
+          .toList
+          .tail
+          .map { line =>
+            val name = line.split(':')(0)
+            name -> line.substring(name.length + 2)
           }
+    }
+
+    val mainTreeJson = s.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/recentResults", headers = headers)
+    val root = read[Root](mainTreeJson)
+
+    val all: String => Boolean = _ => true
+    def matchId(id: String): String => Boolean = that => id == that
+
+    println("downloading championship and event IDs")
+    val championshipsJson = s.get(s"https://dirtrally2.dirtgame.com/api/Club/$clubId/championships", headers = headers)
+    val championships = read[List[CChampionship]](championshipsJson)
+    val activeCE: Option[(CChampionship, CEvent)] = (for {
+      c <- championships
+      e <- c.events if e.eventStatus == "Active"
+    } yield (c, e)).headOption
+
+    val (championshipFilter, eventFilter) = {
+      if (args.length > 2) {
+        matchId(args(1)) -> matchId(args(2))
+      } else if (args.length > 1 && args(1).startsWith("auto")) {
+        val (cId, eChallengeId) = activeCE match {
+          case Some((activeChampionship, activeEvent)) if (args(1) == "auto")=>
+            println("downloading active event")
+            (activeChampionship.id, activeEvent.id)
+          case Some((_, activeEvent)) =>
+            println("downloading last active event")
+            val allCE: List[(CChampionship, CEvent)] = championships.flatMap(c => c.events.map(e => (c, e)))
+            val previousCE = allCE.takeWhile(ce => ce._2 != activeEvent).lastOption.getOrElse(throw new IllegalStateException("No previous active event"))
+            previousCE._1.id -> previousCE._2.id
+          case None =>
+            throw new IllegalStateException("no active events, cannot use auto mode")
         }
-        if(stats.getN() > 1)
-          new LogNormalDistribution(stats.getMean, stats.getStandardDeviation)
-        else
-          new LogNormalDistribution(stats.getMean, 1)
+        val eId = root.championships.flatMap(_.events).find(_.challengeId == eChallengeId).map(_.id).get
+        matchId(cId) -> matchId(eId)
+      } else if (args.length > 1 && args(1) == "all") {
+        ((_: String) => true, (_: String) => true)
+      } else {
+        for {
+          championship <- root.championships
+        } {
+          println("Found championship: " + championship.id)
+          championship.events.map(e => s"    ${e.id}:${e.name}:${e.stages.size - 1}").foreach(println)
+        }
 
+        @tailrec
+        def readNotEmpty(prompt: String): String = {
+          val in = StdIn.readLine(prompt)
+          if (in.isEmpty) readNotEmpty(prompt) else in
+        }
+
+        def parse(x: String): String => Boolean = x match {
+          case "-" => all
+          case s if s.toIntOption.isDefined => matchId(s)
+          case s => throw new IllegalArgumentException(s"$s not a number")
+        }
+
+        println("Enter - for no filter")
+        val cFilter: String => Boolean = if (args.length > 1) {
+          println(s"Matching championship ${args(1)}")
+          id => id == args(1)
+        } else {
+          parse(readNotEmpty(s"Enter championship id: "))
+        }
+        val eFilter = parse(readNotEmpty(s"Enter event id: "))
+        (cFilter, eFilter)
       }
-      val stageDistribution = createDistribution(_.stageTime)
-      val totalDistribution = createDistribution(_.totalTime)
-      key -> (stageDistribution -> totalDistribution)
-  }
+    }
 
-  val f = new File(System.getProperty("ilcavero.output", "leaderboarddata.csv"))
-  val file = new PrintWriter(f)
+    val allLeadeboards: List[LeaderboardHolder] = for {
+      championship <- root.championships if championshipFilter(championship.id)
+      event <- championship.events if eventFilter(event.id)
+      stage <- event.stages
+    } yield {
+      Thread.sleep(400)
 
-  file.println("championship,event,eventName,stage,stageName,rank,name,isDnfEntry,vehicleName,stageTime,stageDiff,totalTime,totalDiff,isLastStage,stageRank,stagePercentile,totalPercentile,wheel,group,drive,stageMean,stageStdDev,totalMean,totalDev")
+      def postBody(wheel: String, page: Int): String =
+        s"""{"challengeId":"${event.challengeId}","selectedEventId":0,"stageId":"${stage.id}","page":$page,"pageSize":100,"orderByTotalTime":true,"platformFilter":"None","playerFilter":"Everyone","filterByAssists":"Unspecified","filterByWheel":"$wheel","nationalityFilter":"None","eventId":"${event.id}"}"""
 
-  allLeaderboardsPlusDnf.foreach { lh =>
-    var dnfIndex = 0
+      def getLeaderboard(wheel: String, page: Int): List[LeaderboardEntries] = {
+        Try(s.post("https://dirtrally2.dirtgame.com/api/Leaderboard",
+          headers = "Content-Type" -> "application/json;charset=utf-8" :: headers, data = postBody(wheel, page))) match {
+          case Success(resp) =>
+            println(s"${championship.id} ${event.id} ${stage.id} $page $wheel -> Received a ${resp.statusCode}")
+            val entries: List[LeaderboardEntries] = read[Leaderboard](resp.text).entries
+            if (entries.size == 100)
+              entries ::: getLeaderboard(wheel, page + 1)
+            else
+              entries
+          case Failure(exception) =>
+            println(s"${championship.id} ${event.id} ${stage.id} $page " + exception.getMessage)
+            println(postBody(wheel, page))
+            throw exception
+        }
+      }
 
+      val wheelsOnly: List[String] = getLeaderboard("ON", 1).map(_.name)
+
+      val leaderboard = getLeaderboard("Unspecified", 1)
+      val leaderboardWithWheels = leaderboard.map(e => e.copy(wheel = Some(wheelsOnly.contains(e.name))))
+      LeaderboardHolder(championship, event, stage, leaderboardWithWheels, activeCE.exists(ce=> ce._2.id == event.challengeId))
+    }
+
+
+    var lastStageMap = Map[String, String]()
     for {
+      lh <- allLeadeboards
       l <- lh.leaderboard
     } {
-      val isLastStage: Boolean = lastStageMap(lh.event.id) == lh.stage.id
-      val stageTimes = stageTimesMap(lh.event.id -> lh.stage.id).sortBy(_.stageTime)
-      val stageRank: Int = {
-        val index = stageTimes.indexWhere(_.driverName == l.name)
-        if (index == -1) {
-          dnfIndex += 1
-          stageTimes.size + dnfIndex
-        } else {
-          index + 1
-        }
-      }
-      val (stageTimeDistribution, totalTimeDistribution) = stageTimesDescriptive(lh.event.id -> lh.stage.id)
-      val (stagePercentile: Double, totalPercentile: Double) = if (!l.isDnfEntry) {
-          100 * (1 - stageTimeDistribution.probability(0, toTimeDouble(l.stageTime))) ->
-          100 * (1 - totalTimeDistribution.probability(0, toTimeDouble(l.totalTime)))
-      } else {
-        (0d, 0d)
-      }
-
-      val group = cars(l.vehicleName)
-      val drive = groups(group)
-      file.println(List(lh.championship.id, lh.event.id, lh.event.name, lh.stage.id.toInt + 1, lh.stage.name, l.rank, l.name, l.isDnfEntry, l.vehicleName,
-        toTimeDouble(l.stageTime).formatted("%.3f"), toTimeDouble(l.stageDiff).formatted("%.3f"), toTimeDouble(l.totalTime).formatted("%.3f"), toTimeDouble(l.totalDiff).formatted("%.3f"),
-        isLastStage, stageRank, stagePercentile.formatted("%.2f"), totalPercentile.formatted("%.2f"), l.wheel.get.toString, group, drive,
-        stageTimeDistribution.getScale().formatted("%.6f"), stageTimeDistribution.getShape().formatted("%.6f"), totalTimeDistribution.getScale().formatted("%.6f"),totalTimeDistribution.getShape().formatted("%.6f")).mkString(","))
+      lastStageMap = lastStageMap.updated(lh.event.id, lh.stage.id)
     }
+
+    val startingDrivers: Map[(Championship, Event), Set[(String, Boolean, String)]] = {
+      var result: Map[(Championship, Event), Set[(String, Boolean, String)]] = Map.empty.withDefaultValue(Set.empty)
+      for {
+        LeaderboardHolder(championship, event, stage, entries, _) <- allLeadeboards if entries.nonEmpty && stage.id != lastStageMap(event.id)
+      } {
+        val startingDriverInfo: Set[(String, Boolean, String)] = entries.map {
+          entry => (entry.name, entry.wheel.get, entry.vehicleName)
+        }.toSet
+        result = result.updated(championship -> event, result(championship -> event) ++ startingDriverInfo)
+      }
+      result
+    }
+
+    val allLeaderboardsPlusDnf = allLeadeboards.map {
+      case LeaderboardHolder(championship, event, stage, entries, activeEvent) if entries.nonEmpty && stage.id == lastStageMap(event.id) =>
+        val stageStartingDrivers: Set[(String, Boolean, String)] = startingDrivers(championship -> event)
+        val runningDrivers = entries.map(e => e.name).toSet
+        var dnfRank = runningDrivers.size
+        val missingDnfs: Set[LeaderboardEntries] = stageStartingDrivers.collect {
+          case (name, wheel, vehicle) if !runningDrivers.contains(name) =>
+            dnfRank += 1
+            val totaltimeMin = 30 * (stage.id.toInt + 1)
+            val hourTotalTime = totaltimeMin / 60
+            val minTotalTime = totaltimeMin % 60
+            val totalTime = hourTotalTime.formatted("%02d") + ":" + minTotalTime.formatted("%02d") + ":00.000"
+            LeaderboardEntries(dnfRank, name, isDnfEntry = true, vehicleName = vehicle,
+              stageTime = "30:00.000", stageDiff = "+30:00.000", totalTime = totalTime, totalDiff = "+" + totalTime, wheel = Some(wheel))
+        }
+        LeaderboardHolder(championship, event, stage, entries ++ missingDnfs, activeEvent)
+      case lh => lh
+    }
+    allLeaderboardsPlusDnf
   }
 
-  file.close()
+  def generateCsv(allLeadeboards: List[LeaderboardHolder]): Unit = {
+    //adds isLastStage, stageRank, timesInSecs totalStageDrivers, time percentiles
+
+    val hourPattern = raw"""\+?(\d\d):(\d\d):(\d\d\.\d\d\d)""".r
+    val timePattern = raw"""\+?(\d\d):(\d\d\.\d\d\d)""".r
+
+    def toTimeDouble(s: String): Double = s match {
+      case hourPattern(hours, minutes, seconds) =>
+        hours.toDouble * 3600 + minutes.toDouble * 60 + seconds.toDouble
+      case timePattern(minutes, seconds) =>
+        minutes.toDouble * 60 + seconds.toDouble
+      case "--" =>
+        0
+    }
+
+    case class StageResult(driverName: String, stageTime: Double, totalTime: Double, isDnf: Boolean)
+
+    var stageTimesMap = Map[(String, String), List[StageResult]]()
+    for {
+      lh <- allLeadeboards
+      l <- lh.leaderboard
+    } {
+      val stageTimeDouble = toTimeDouble(l.stageTime)
+      val totalTimeDouble = toTimeDouble(l.totalTime)
+      stageTimesMap = stageTimesMap.updatedWith(lh.event.id -> lh.stage.id) {
+        case Some(rest) =>
+          Some(StageResult(l.name, stageTimeDouble, totalTimeDouble, l.isDnfEntry) :: rest)
+        case None =>
+          Some(StageResult(l.name, stageTimeDouble, totalTimeDouble, l.isDnfEntry) :: Nil)
+      }
+    }
+
+    val stageTimesDescriptive: Map[(String, String), (LogNormalDistribution, LogNormalDistribution)] = stageTimesMap.map {
+      case (key, stageResults) =>
+        def createDistribution(getTime: StageResult => Double): LogNormalDistribution = {
+          val stats = new DescriptiveStatistics()
+          val reasonableMaxMultiplier = 1.25 // Times beyond this will not be part of the model and will get 0.0
+          val reasonableMax = stageResults.filter(!_.isDnf).map(getTime).minOption.map(_ * reasonableMaxMultiplier).getOrElse(0d)
+          stageResults.foreach { result =>
+            if (!result.isDnf && getTime(result) < reasonableMax) {
+              stats.addValue(Math.log(getTime(result)))
+            }
+          }
+          if (stats.getN() > 1)
+            new LogNormalDistribution(stats.getMean, stats.getStandardDeviation)
+          else
+            new LogNormalDistribution(stats.getMean, 1)
+
+        }
+
+        val stageDistribution = createDistribution(_.stageTime)
+        val totalDistribution = createDistribution(_.totalTime)
+        key -> (stageDistribution -> totalDistribution)
+    }
+
+    val f = new File(System.getProperty("ilcavero.output", "leaderboarddata.csv"))
+    val file = new PrintWriter(f)
+
+    file.println("championship,event,eventName,stage,stageName,rank,name,isDnfEntry,vehicleName,stageTime,stageDiff,totalTime,totalDiff,isLastStage,stageRank,stagePercentile,totalPercentile,wheel,group,drive,stageMean,stageStdDev,totalMean,totalDev")
+
+    allLeadeboards.foreach { lh =>
+      var dnfIndex = 0
+
+      for {
+        l <- lh.leaderboard
+      } {
+        val isLastStage: Boolean = lh.event.stages.map(_.id.toInt).max.toString == lh.stage.id
+        val stageTimes = stageTimesMap(lh.event.id -> lh.stage.id).sortBy(_.stageTime)
+        val stageRank: Int = {
+          val index = stageTimes.indexWhere(_.driverName == l.name)
+          if (index == -1) {
+            dnfIndex += 1
+            stageTimes.size + dnfIndex
+          } else {
+            index + 1
+          }
+        }
+        val (stageTimeDistribution, totalTimeDistribution) = stageTimesDescriptive(lh.event.id -> lh.stage.id)
+        val (stagePercentile: Double, totalPercentile: Double) = if (!l.isDnfEntry) {
+          100 * (1 - stageTimeDistribution.probability(0, toTimeDouble(l.stageTime))) ->
+            100 * (1 - totalTimeDistribution.probability(0, toTimeDouble(l.totalTime)))
+        } else {
+          (0d, 0d)
+        }
+
+        val group = cars(l.vehicleName)
+        val drive = groups(group)
+        file.println(List(lh.championship.id, lh.event.id, lh.event.name, lh.stage.id.toInt + 1, lh.stage.name, l.rank, l.name, l.isDnfEntry, l.vehicleName,
+          toTimeDouble(l.stageTime).formatted("%.3f"), toTimeDouble(l.stageDiff).formatted("%.3f"), toTimeDouble(l.totalTime).formatted("%.3f"), toTimeDouble(l.totalDiff).formatted("%.3f"),
+          isLastStage, stageRank, stagePercentile.formatted("%.2f"), totalPercentile.formatted("%.2f"), l.wheel.get.toString, group, drive,
+          stageTimeDistribution.getScale().formatted("%.6f"), stageTimeDistribution.getShape().formatted("%.6f"), totalTimeDistribution.getScale().formatted("%.6f"), totalTimeDistribution.getShape().formatted("%.6f")).mkString(","))
+      }
+    }
+
+    file.close()
+  }
 
   lazy val cars = Map(
     "MINI Cooper S" -> "H1 (FWD)",
